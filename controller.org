@@ -1,0 +1,256 @@
+#+TITLE: Quick 2048 AI Controller
+
+* Immediate Test - Input Interception
+
+First, let's test that we can control the game:
+
+#+begin_src gdb :tangle 2048-quick-test.gdb
+# Quick test to intercept input
+break wgetch
+commands
+silent
+# Always return 'w' (up)
+return 119
+continue
+end
+run
+#+end_src
+
+* Finding the Game State
+
+#+begin_src gdb :tangle 2048-find-state.gdb
+# Find the game board in memory
+break main
+run
+
+# When at main, let's search for patterns
+# The board you showed has: empty, 2, 2, 8, 16
+# In memory, empty is likely 0, and values are powers of 2
+
+# Let's search for your exact board pattern
+# Row 1: 0, 0, 0, 2
+# Row 2: 2, 0, 0, 2
+# Row 3: 0, 0, 0, 8
+# Row 4: 0, 2, 16, 2
+
+# Continue to the game screen
+continue
+
+# Now let's find where these values are stored
+# Search for the sequence 0,0,0,2 (first row)
+find /w 0x400000, 0x500000, 0, 0, 0, 2
+
+# Or search for the unique value 16
+find /w 0x400000, 0x500000, 16
+#+end_src
+
+* Working AI Controller
+
+#+begin_src scheme :tangle src/scheme/2048-ai.scm :mkdirp t
+;;; 2048-ai.scm - Simple but effective 2048 AI
+
+(use-modules (gdb))
+
+;; Global to store game state
+(define *board-address* #f)
+(define *last-board* (make-vector 16 0))
+
+;; Read board from memory
+(define (read-board addr)
+  (let ((board (make-vector 16)))
+    (do ((i 0 (+ i 1)))
+        ((>= i 16))
+      (let* ((inferior (current-inferior))
+             (bytes (inferior-read-memory inferior (+ addr (* i 4)) 4)))
+        (vector-set! board i (bytevector-s32-native-ref bytes 0))))
+    board))
+
+;; Display board
+(define (show-board board)
+  (format #t "~%Current board:~%")
+  (do ((row 0 (+ row 1)))
+      ((>= row 4))
+    (do ((col 0 (+ col 1)))
+        ((>= col 4))
+      (format #t "~5d" (vector-ref board (+ (* row 4) col))))
+    (format #t "~%")))
+
+;; Check if move is possible
+(define (can-move? board direction)
+  (case direction
+    ((up) (can-move-vertical? board -4))
+    ((down) (can-move-vertical? board 4))
+    ((left) (can-move-horizontal? board -1))
+    ((right) (can-move-horizontal? board 1))
+    (else #f)))
+
+(define (can-move-vertical? board offset)
+  (let ((start (if (< offset 0) 4 0))
+        (end (if (< offset 0) 16 12)))
+    (let loop ((i start))
+      (if (>= i end)
+          #f
+          (let ((curr (vector-ref board i))
+                (next-idx (+ i offset)))
+            (if (and (> curr 0)
+                     (or (= (vector-ref board next-idx) 0)
+                         (= (vector-ref board next-idx) curr)))
+                #t
+                (loop (+ i 1))))))))
+
+(define (can-move-horizontal? board offset)
+  (let loop ((row 0))
+    (if (>= row 4)
+        #f
+        (let loop2 ((col (if (< offset 0) 1 0)))
+          (if (>= col (if (< offset 0) 4 3))
+              (loop (+ row 1))
+              (let* ((idx (+ (* row 4) col))
+                     (curr (vector-ref board idx))
+                     (next-idx (+ idx offset)))
+                (if (and (> curr 0)
+                         (or (= (vector-ref board next-idx) 0)
+                             (= (vector-ref board next-idx) curr)))
+                    #t
+                    (loop2 (+ col 1)))))))))
+
+;; Count empty cells
+(define (count-empty board)
+  (let loop ((i 0) (count 0))
+    (if (>= i 16)
+        count
+        (loop (+ i 1)
+              (if (= (vector-ref board i) 0)
+                  (+ count 1)
+                  count)))))
+
+;; Simple AI strategy
+(define (choose-move board)
+  ;; Priority: down > right > left > up
+  ;; This keeps tiles in lower rows and creates merging opportunities
+  (cond
+   ((can-move? board 'down) 's)   ; down
+   ((can-move? board 'right) 'd)  ; right
+   ((can-move? board 'left) 'a)   ; left
+   ((can-move? board 'up) 'w)     ; up
+   (else 'q)))                     ; quit if no moves
+
+;; Main AI function
+(define (ai-move)
+  (if *board-address*
+      (let* ((board (read-board *board-address*))
+             (move (choose-move board)))
+        (show-board board)
+        (format #t "AI chooses: ~a~%" move)
+        (char->integer move))
+      (begin
+        (format #t "Board address not set!~%")
+        (char->integer #\w))))
+
+;; Register commands
+(register-command!
+ (make-command "2048-find"
+               #:command-class COMMAND_USER
+               #:doc "Find 2048 board in memory"
+               #:invoke
+               (lambda (self args from-tty)
+                 (execute "break main")
+                 (execute "run")
+                 (format #t "Searching for board...~%")
+                 ;; This is a placeholder - need to implement search
+                 (format #t "Use 'find' command to locate board~%"))))
+
+(register-command!
+ (make-command "2048-set-addr"
+               #:command-class COMMAND_USER  
+               #:doc "Set board address: 2048-set-addr 0xADDRESS"
+               #:invoke
+               (lambda (self args from-tty)
+                 (set! *board-address* (string->number args 0))
+                 (format #t "Board address set to: ~x~%" *board-address*))))
+
+(register-command!
+ (make-command "2048-auto"
+               #:command-class COMMAND_USER
+               #:doc "Enable AI auto-play"
+               #:invoke
+               (lambda (self args from-tty)
+                 (execute "break wgetch")
+                 (execute "commands")
+                 (execute "silent")
+                 (execute "guile (define result (ai-move))")
+                 (execute "return $result")
+                 (execute "end")
+                 (format #t "AI auto-play enabled!~%"))))
+#+end_src
+
+* Quick Start Script
+
+#+begin_src bash :tangle play-2048.sh :mkdirp t :shebang #!/bin/sh
+#!/bin/sh
+# Quick script to play 2048 with AI
+
+cat > /tmp/2048-ai-init.gdb << 'EOF'
+# Load Guile support
+set guile print-stack full
+
+# Load our AI
+guile (load "src/scheme/2048-ai.scm")
+
+# Instructions
+printf "\n=== 2048 AI Controller ===\n"
+printf "1. First, find the board address:\n"
+printf "   - Let the game start\n"
+printf "   - Use: find /w 0x400000, 0x500000, <unique-value>\n"
+printf "   - Look for a 16-integer sequence that matches the board\n"
+printf "2. Set the address: 2048-set-addr 0xADDRESS\n"
+printf "3. Enable AI: 2048-auto\n"
+printf "4. Continue playing: continue\n\n"
+
+# Break at main to start
+break main
+run
+EOF
+
+gdb -x /tmp/2048-ai-init.gdb /usr/local/bin/2048
+#+end_src
+
+* Finding Board Manually
+
+Once in GDB with the game running:
+
+#+begin_src gdb
+# After the game shows the board, search for unique patterns
+# If you see a 16 on the board:
+(gdb) find /w 0x400000, 0x500000, 16
+
+# Or search for a sequence (e.g., if top row is 0,0,0,2):
+(gdb) find /w 0x400000, 0x500000, 0, 0, 0, 2
+
+# Once you find matches, examine them:
+(gdb) x/16wx 0xADDRESS
+
+# Look for a pattern that matches your 4x4 board
+# The board is likely stored as 16 consecutive integers
+
+# When you find it:
+(gdb) 2048-set-addr 0xADDRESS
+(gdb) 2048-auto
+(gdb) continue
+#+end_src
+
+* Alternative: Symbol Search
+
+#+begin_src gdb
+# Sometimes the board has a symbol name
+(gdb) info variables board
+(gdb) info variables grid
+(gdb) info variables game
+
+# Or look at all globals
+(gdb) info variables
+
+# If you find something promising:
+(gdb) print &variable_name
+(gdb) x/16wx &variable_name
+#+end_src
