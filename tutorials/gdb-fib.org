@@ -1,0 +1,753 @@
+#+TITLE: GDB Tutorial: Debugging Fibonacci Implementations
+#+AUTHOR: GDB Learning Guide
+#+PROPERTY: header-args:C :flags -g3 -O0 -Wall
+#+PROPERTY: header-args:bash :results output :exports both
+
+* Overview
+
+This tutorial demonstrates GDB debugging techniques using simple Fibonacci implementations in C. We'll explore non-interactive batch debugging, interactive sessions, and Emacs GDB integration.
+
+* The Fibonacci Program
+
+** Source Code
+
+#+begin_src C :tangle fibonacci.c :mkdirp yes
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+// Global variables for inspection
+long recursive_calls = 0;
+long memo_hits = 0;
+long memo_misses = 0;
+
+// Memoization cache
+#define MAX_MEMO 100
+long memo_cache[MAX_MEMO];
+int memo_initialized = 0;
+
+// Basic recursive Fibonacci
+long fib_recursive(int n) {
+    recursive_calls++;
+    
+    if (n <= 1) {
+        return n;
+    }
+    
+    return fib_recursive(n - 1) + fib_recursive(n - 2);
+}
+
+// Memoized Fibonacci
+long fib_memoized(int n) {
+    // Initialize cache on first call
+    if (!memo_initialized) {
+        memset(memo_cache, -1, sizeof(memo_cache));
+        memo_initialized = 1;
+    }
+    
+    if (n < 0 || n >= MAX_MEMO) {
+        fprintf(stderr, "Error: n must be between 0 and %d\n", MAX_MEMO - 1);
+        return -1;
+    }
+    
+    if (n <= 1) {
+        return n;
+    }
+    
+    // Check cache
+    if (memo_cache[n] != -1) {
+        memo_hits++;
+        return memo_cache[n];
+    }
+    
+    // Calculate and cache
+    memo_misses++;
+    memo_cache[n] = fib_memoized(n - 1) + fib_memoized(n - 2);
+    return memo_cache[n];
+}
+
+// Iterative Fibonacci for comparison
+long fib_iterative(int n) {
+    if (n <= 1) return n;
+    
+    long a = 0, b = 1;
+    for (int i = 2; i <= n; i++) {
+        long temp = a + b;
+        a = b;
+        b = temp;
+    }
+    return b;
+}
+
+// Helper function to measure time
+double measure_time(long (*fib_func)(int), int n, long *result) {
+    clock_t start = clock();
+    *result = fib_func(n);
+    clock_t end = clock();
+    return ((double)(end - start)) / CLOCKS_PER_SEC;
+}
+
+// Function with a bug for debugging practice
+long fib_buggy(int n) {
+    // Bug: doesn't handle n=0 correctly
+    if (n == 1) return 1;
+    if (n == 2) return 1;
+    return fib_buggy(n - 1) + fib_buggy(n - 2);
+}
+
+void print_statistics() {
+    printf("\nStatistics:\n");
+    printf("  Recursive calls: %ld\n", recursive_calls);
+    printf("  Memo hits: %ld\n", memo_hits);
+    printf("  Memo misses: %ld\n", memo_misses);
+    if (memo_hits + memo_misses > 0) {
+        printf("  Cache hit rate: %.2f%%\n", 
+               (100.0 * memo_hits) / (memo_hits + memo_misses));
+    }
+}
+
+void reset_statistics() {
+    recursive_calls = 0;
+    memo_hits = 0;
+    memo_misses = 0;
+}
+
+int main(int argc, char *argv[]) {
+    int n = 10;  // Default value
+    
+    if (argc > 1) {
+        n = atoi(argv[1]);
+        if (n < 0 || n > 45) {
+            fprintf(stderr, "Please use n between 0 and 45\n");
+            return 1;
+        }
+    }
+    
+    printf("Calculating Fibonacci(%d)\n", n);
+    printf("==========================\n\n");
+    
+    long result;
+    double time_taken;
+    
+    // Test recursive version
+    reset_statistics();
+    printf("Recursive implementation:\n");
+    time_taken = measure_time(fib_recursive, n, &result);
+    printf("  fib(%d) = %ld\n", n, result);
+    printf("  Time: %.6f seconds\n", time_taken);
+    printf("  Calls: %ld\n", recursive_calls);
+    
+    // Test memoized version
+    reset_statistics();
+    memo_initialized = 0;  // Reset memo cache
+    printf("\nMemoized implementation:\n");
+    time_taken = measure_time(fib_memoized, n, &result);
+    printf("  fib(%d) = %ld\n", n, result);
+    printf("  Time: %.6f seconds\n", time_taken);
+    print_statistics();
+    
+    // Test iterative version
+    printf("\nIterative implementation:\n");
+    time_taken = measure_time(fib_iterative, n, &result);
+    printf("  fib(%d) = %ld\n", n, result);
+    printf("  Time: %.6f seconds\n", time_taken);
+    
+    // Demonstrate the buggy version (commented out to avoid crash)
+    // printf("\nBuggy implementation:\n");
+    // result = fib_buggy(n);  // This will crash for n=0!
+    // printf("  fib(%d) = %ld\n", n, result);
+    
+    return 0;
+}
+#+end_src
+
+** Makefile
+
+#+begin_src makefile :tangle Makefile :mkdirp yes
+# Makefile for Fibonacci GDB Tutorial
+
+CC = gcc
+CFLAGS = -g3 -O0 -Wall -Wextra -fno-omit-frame-pointer
+TARGET = fibonacci
+
+.PHONY: all clean run debug
+
+all: $(TARGET)
+
+$(TARGET): fibonacci.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+run: $(TARGET)
+	./$(TARGET) 10
+
+# Various GDB debugging targets
+debug: $(TARGET)
+	gdb ./$(TARGET)
+
+debug-batch: $(TARGET)
+	gdb -batch -ex "break fib_recursive" -ex "run 5" -ex "bt" -ex "info locals" ./$(TARGET)
+
+debug-mi: $(TARGET)
+	gdb -i=mi ./$(TARGET)
+
+clean:
+	rm -f $(TARGET) core *.o
+
+# Generate assembly for inspection
+asm: fibonacci.c
+	$(CC) $(CFLAGS) -S -fverbose-asm -o fibonacci.s fibonacci.c
+#+end_src
+
+* Non-Interactive GDB Sessions
+
+** Basic Batch Mode
+
+*** Compile first
+
+#+begin_src bash :results output
+gcc -g3 -O0 -o fibonacci fibonacci.c
+#+end_src
+
+#+RESULTS:
+
+
+*** Configure GDB for this tutorial (optional)
+
+If you see auto-load warnings, add this to your ~/.config/gdb/gdbinit:
+
+
+#+begin_src shell
+  mkdir -p ~/.config/gdb/
+  echo 'add-auto-load-safe-path '$PWD'/fibonacci-gdb.py'  >> ~/.config/gdb/gdbinit
+#+end_src
+
+#+RESULTS:
+: /home/jwalsh/projects/aygp-dr/gdb-game-ai/tutorials
+
+*** Run GDB in batch mode to print backtrace at a breakpoint
+
+#+begin_src bash :results output
+gdb -batch -quiet \
+    -ex "break fib_recursive" \
+    -ex "run 5" \
+    -ex "bt 3" \
+    -ex "info args" \
+    -ex "kill" \
+    -ex "quit" \
+    ./fibonacci
+#+end_src
+
+#+RESULTS:
+#+begin_example
+Fibonacci GDB analysis commands loaded:
+  analyze-fib N  - Analyze call patterns for fib(N)
+  watch-memo N   - Watch memoization effectiveness
+Breakpoint 1 at 0x40077e: file fibonacci.c, line 18.
+Calculating Fibonacci(5)
+==========================
+
+Recursive implementation:
+
+Breakpoint 1, fib_recursive (n=5) at fibonacci.c:18
+18	    recursive_calls++;
+#0  fib_recursive (n=5) at fibonacci.c:18
+#1  0x0000000000400948 in measure_time (fib_func=0x400772 <fib_recursive>, n=5, result=0x7fffffffd258) at fibonacci.c:72
+#2  0x0000000000400b57 in main (argc=2, argv=0x7fffffffd2f8) at fibonacci.c:122
+n = 5
+Kill the program being debugged? (y or n) [answered Y; input not from terminal]
+[Inferior 1 (process 57494) killed]
+#+end_example
+
+** Automated Testing Script
+
+#+begin_src bash :tangle gdb-test-fib.sh :shebang #!/usr/bin/env bash
+#!/usr/bin/env bash
+# Automated GDB testing script
+
+echo "=== GDB Fibonacci Testing ==="
+
+# Test 1: Count recursive calls
+echo -e "\n1. Counting recursive calls for fib(10):"
+gdb -batch -quiet \
+    -ex "break fib_recursive" \
+    -ex "commands" \
+    -ex "silent" \
+    -ex "continue" \
+    -ex "end" \
+    -ex "run 10" \
+    -ex "print recursive_calls" \
+    ./fibonacci 2>/dev/null | grep "recursive_calls"
+
+# Test 2: Examine memoization cache
+echo -e "\n2. Examining memoization cache after fib(10):"
+gdb -batch -quiet \
+    -ex "break print_statistics" \
+    -ex "run 10" \
+    -ex "print memo_cache[0]@11" \
+    -ex "continue" \
+    ./fibonacci 2>/dev/null | grep -A11 "memo_cache"
+
+# Test 3: Performance comparison
+echo -e "\n3. Breakpoint hit count comparison:"
+gdb -batch -quiet \
+    -ex "break fib_recursive" \
+    -ex "ignore 1 1000000" \
+    -ex "run 20" \
+    -ex "info breakpoints" \
+    ./fibonacci 2>/dev/null | grep "breakpoint.*hit"
+#+end_src
+
+** GDB Command File
+
+#+begin_src gdb :tangle fibonacci-commands.gdb
+# GDB command file for fibonacci debugging
+
+# Pretty printing
+set print pretty on
+set print array on
+set pagination off
+
+# Define a function to trace fibonacci calls
+define trace_fib
+    break fib_recursive
+    commands
+        silent
+        printf "fib(%d) called\n", n
+        continue
+    end
+end
+
+# Define a function to examine the memo cache
+define show_memo
+    if memo_initialized
+        printf "Memoization cache (first 20 entries):\n"
+        set $i = 0
+        while $i < 20
+            if memo_cache[$i] != -1
+                printf "  memo[%d] = %ld\n", $i, memo_cache[$i]
+            end
+            set $i = $i + 1
+        end
+    else
+        printf "Memo cache not initialized\n"
+    end
+end
+
+# Useful breakpoints
+break main
+break fib_buggy
+
+# Run with argument
+run 15
+
+# At main breakpoint, examine initial state
+print n
+continue
+
+# The program will run to completion
+#+end_src
+
+** Python GDB Script
+
+#+begin_src python :tangle fibonacci-gdb.py
+#!/usr/bin/env python3
+"""GDB Python script for analyzing fibonacci implementations"""
+
+import gdb
+
+class FibonacciAnalyzer(gdb.Command):
+    """Analyze fibonacci execution patterns"""
+    
+    def __init__(self):
+        super(FibonacciAnalyzer, self).__init__("analyze-fib", gdb.COMMAND_USER)
+        self.call_counts = {}
+        
+    def invoke(self, arg, from_tty):
+        # Set up breakpoint with callback
+        bp = FibBreakpoint()
+        
+        # Run the program
+        gdb.execute(f"run {arg}")
+        
+        # Print analysis
+        print("\nCall frequency analysis:")
+        for n, count in sorted(bp.call_counts.items()):
+            print(f"  fib({n}) called {count} times")
+
+class FibBreakpoint(gdb.Breakpoint):
+    """Breakpoint that tracks fibonacci calls"""
+    
+    def __init__(self):
+        super(FibBreakpoint, self).__init__("fib_recursive")
+        self.call_counts = {}
+        
+    def stop(self):
+        # Get the value of n
+        n = int(gdb.parse_and_eval("n"))
+        
+        # Track calls
+        self.call_counts[n] = self.call_counts.get(n, 0) + 1
+        
+        # Don't actually stop
+        return False
+
+class MemoWatcher(gdb.Command):
+    """Watch memoization cache effectiveness"""
+    
+    def __init__(self):
+        super(MemoWatcher, self).__init__("watch-memo", gdb.COMMAND_USER)
+        
+    def invoke(self, arg, from_tty):
+        # Set watchpoint on memo statistics
+        gdb.execute("watch memo_hits")
+        gdb.execute("watch memo_misses")
+        
+        # Run program
+        gdb.execute(f"run {arg}")
+
+# Register commands
+FibonacciAnalyzer()
+MemoWatcher()
+
+print("Fibonacci GDB analysis commands loaded:")
+print("  analyze-fib N  - Analyze call patterns for fib(N)")
+print("  watch-memo N   - Watch memoization effectiveness")
+#+end_src
+
+* Interactive GDB Sessions
+
+** Basic Interactive Session
+
+#+begin_src bash :eval no
+# Start GDB
+$ gdb ./fibonacci
+
+# In GDB:
+(gdb) break fib_recursive
+Breakpoint 1 at 0x11b5: file fibonacci.c, line 18.
+
+(gdb) run 5
+Starting program: fibonacci 5
+
+Breakpoint 1, fib_recursive (n=5) at fibonacci.c:18
+18          recursive_calls++;
+
+(gdb) backtrace
+#0  fib_recursive (n=5) at fibonacci.c:18
+#1  0x000055555555531a in main (argc=2, argv=0x7fffffffe5d8) at fibonacci.c:123
+
+(gdb) step
+20          if (n <= 1) {
+
+(gdb) print n
+$1 = 5
+
+(gdb) finish
+Run till exit from #0  fib_recursive (n=5) at fibonacci.c:24
+0x000055555555531a in main (argc=2, argv=0x7fffffffe5d8) at fibonacci.c:123
+123         time_taken = measure_time(fib_recursive, n, &result);
+Value returned is $2 = 5
+
+(gdb) continue
+Continuing.
+#+end_src
+
+** Advanced Interactive Commands
+
+#+begin_src gdb :tangle advanced-debugging.gdb
+# Advanced GDB session for fibonacci
+
+# TUI mode for source viewing
+# tui enable
+# layout src
+
+# Set up conditional breakpoint
+break fib_recursive if n == 0 || n == 1
+commands
+    printf "Base case: fib(%d) = %d\n", n, n
+    continue
+end
+
+# Watch global variables
+display recursive_calls
+display memo_hits
+display memo_misses
+
+# Set up catchpoint for the buggy function
+catch assert
+
+# Memory examination function
+define examine_memo
+    print "Examining memoization cache:"
+    # Show first 20 entries
+    print memo_cache[0]@20
+    
+    # Count non-empty entries
+    set $i = 0
+    set $count = 0
+    while $i < 100
+        if memo_cache[$i] != -1
+            set $count = $count + 1
+        end
+        set $i = $i + 1
+    end
+    printf "Cache entries used: %d / 100\n", $count
+end
+
+# Performance analysis function
+define perf_compare
+    set $n = $arg0
+    
+    # Test recursive
+    set recursive_calls = 0
+    call fib_recursive($n)
+    printf "Recursive calls for fib(%d): %ld\n", $n, recursive_calls
+    
+    # Test memoized
+    set memo_hits = 0
+    set memo_misses = 0
+    call fib_memoized($n)
+    printf "Memoized - hits: %ld, misses: %ld\n", memo_hits, memo_misses
+end
+
+# Stepping through with auto-display
+define smart_step
+    while 1
+        step
+        if $rip == fib_recursive || $rip == fib_memoized
+            backtrace 3
+            info locals
+        end
+    end
+end
+#+end_src
+
+* Emacs GDB Integration
+
+** Basic Setup
+
+#+begin_src emacs-lisp :tangle gdb-setup.el
+;; Emacs GDB configuration for fibonacci debugging
+
+(require 'gdb-mi)
+
+;; Configure GDB
+(setq gdb-many-windows t)
+(setq gdb-show-main t)
+(setq gdb-thread-buffer-verbose-names t)
+(setq gdb-window-configuration 'gdb-many-windows)
+
+;; Custom layout function
+(defun my-gdb-setup ()
+  "Custom GDB window layout"
+  (interactive)
+  (gdb-many-windows)
+  ;; Additional customization
+  (split-window-horizontally)
+  (other-window 1)
+  (gdb-set-window-buffer 'gdb-locals-buffer)
+  (other-window 1)
+  (gdb-set-window-buffer 'gdb-stack-buffer))
+
+;; Keybindings
+(global-set-key (kbd "C-c g d") 'gdb)
+(global-set-key (kbd "C-c g l") 'my-gdb-setup)
+
+;; Function to debug fibonacci with preset breakpoints
+(defun debug-fibonacci (n)
+  "Start debugging fibonacci with argument N"
+  (interactive "nFibonacci argument: ")
+  (let ((program (expand-file-name "./fibonacci")))
+    (gdb (format "gdb -i=mi %s" program))
+    (sleep-for 1)  ; Wait for GDB to start
+    (gdb-send-string (format "break fib_recursive\n"))
+    (gdb-send-string (format "break fib_memoized\n"))
+    (gdb-send-string (format "run %d\n" n))))
+#+end_src
+
+** Emacs Debugging Session
+
+#+begin_src org :eval no
+* Debugging in Emacs
+
+1. Start Emacs and open this file
+2. M-x gdb RET
+3. Run gdb -i=mi ./fibonacci RET
+
+The GDB interface will open with multiple windows:
+
+- *gud-fibonacci* :: GDB command buffer
+- *source* :: Source code with current line highlighted  
+- *breakpoints* :: List of breakpoints
+- *locals* :: Local variables
+- *stack* :: Call stack
+- *threads* :: Thread information
+
+** Setting Breakpoints
+
+Click in the fringe (left margin) of the source buffer to set breakpoints visually.
+
+** Useful Commands in Emacs GDB Mode
+
+| Key       | Command                | Description                    |
+|-----------+------------------------+--------------------------------|
+| C-x C-a b | gud-break              | Set breakpoint at current line |
+| C-x C-a d | gud-remove            | Remove breakpoint              |
+| C-x C-a n | gud-next              | Step over (next)               |
+| C-x C-a s | gud-step              | Step into                      |
+| C-x C-a c | gud-cont              | Continue execution             |
+| C-x C-a f | gud-finish            | Finish current function        |
+| C-x C-a < | gud-up                | Go up stack frame              |
+| C-x C-a > | gud-down              | Go down stack frame            |
+| C-x C-a p | gud-print             | Print variable at point        |
+| C-x C-a w | gud-watch             | Set watchpoint on variable     |
+
+** Example Session
+
+#+begin_example
+;; In *gud-fibonacci* buffer:
+(gdb) break fib_recursive
+Breakpoint 1 at 0x11b5: file fibonacci.c, line 18.
+
+(gdb) run 10
+Starting program: /path/to/fibonacci 10
+[New Thread 0x7ffff7dc1740 (LWP 12345)]
+
+Breakpoint 1, fib_recursive (n=10) at fibonacci.c:18
+18          recursive_calls++;
+
+;; The source window now highlights line 18
+;; The locals window shows: n = 10
+;; The stack window shows the call stack
+#+end_example
+#+end_src
+
+** Org-Babel GDB Integration
+
+#+begin_src org :eval no
+** Running GDB from Org-mode
+
+You can execute GDB commands directly from org-mode:
+
+#+begin_src bash :results output :dir .
+gdb -batch -ex "file fibonacci" -ex "break main" -ex "run 5" -ex "print n" -ex "quit"
+#+end_src
+
+#+RESULTS:
+: Breakpoint 1 at 0x5555555551ea: file fibonacci.c, line 110.
+: 
+: Breakpoint 1, main (argc=2, argv=0x7fffffffe5d8) at fibonacci.c:110
+: 110         int n = 10;  // Default value
+: $1 = 32767
+#+end_src
+
+* Tips and Best Practices
+
+** 1. Compilation Flags
+
+Always compile with debugging symbols:
+- `-g3`: Maximum debugging information
+- `-O0`: No optimization (easier debugging)
+- `-fno-omit-frame-pointer`: Better stack traces
+
+** 2. Useful GDB Commands
+
+#+begin_src gdb :tangle useful-commands.gdb
+# Print array nicely
+set print array on
+set print pretty on
+
+# Print first 10 fibonacci numbers in cache
+print memo_cache[0]@10
+
+# Call function from GDB
+print fib_iterative(20)
+
+# Conditional breakpoint
+break fib_recursive if n > 30
+
+# Breakpoint with command
+break fib_memoized
+commands
+    silent
+    printf "Memo: fib(%d), hits=%ld, misses=%ld\n", n, memo_hits, memo_misses
+    continue
+end
+
+# Watchpoint
+watch recursive_calls
+
+# Catch specific conditions
+catch throw
+catch assert
+
+# Save breakpoints
+save breakpoints fibonacci-breakpoints.gdb
+
+# Load saved breakpoints
+source fibonacci-breakpoints.gdb
+#+end_src
+
+** 3. Debugging the Bug
+
+The `fib_buggy` function has a bug. Let's find it:
+
+#+begin_src bash :results output :dir .
+gdb -batch \
+    -ex "file fibonacci" \
+    -ex "break fib_buggy" \
+    -ex "run 0" \
+    -ex "backtrace" \
+    -ex "quit" \
+    2>&1 | grep -A5 "Segmentation"
+#+end_src
+
+** 4. Performance Analysis
+
+#+begin_src bash :tangle performance-analysis.sh :shebang #!/bin/bash
+#!/bin/bash
+# Performance analysis with GDB
+
+echo "=== Performance Analysis ==="
+
+for n in 10 20 30 35; do
+    echo -e "\nAnalyzing fib($n):"
+    gdb -batch -quiet \
+        -ex "file fibonacci" \
+        -ex "break fib_recursive" \
+        -ex "ignore 1 1000000" \
+        -ex "run $n" \
+        -ex "info breakpoints" \
+        ./fibonacci 2>&1 | grep "hit [0-9]" | awk '{print "  Recursive calls:", $NF}'
+done
+#+end_src
+
+* Summary
+
+This tutorial covered:
+
+1. **Basic C program** with multiple Fibonacci implementations
+2. **Non-interactive debugging** with batch mode and scripts
+3. **Interactive debugging** with breakpoints and examination
+4. **Emacs integration** for visual debugging
+5. **Advanced techniques** like conditional breakpoints and watchpoints
+
+For more practice:
+- Try finding why `fib_buggy` crashes on n=0
+- Add a matrix-based Fibonacci implementation
+- Use GDB's reverse debugging features (if available)
+- Explore GDB's Python API for custom analysis
+
+** Suggested Filenames
+
+For a gist:
+- `gdb-fibonacci-tutorial.org`
+- `debugging-fibonacci-examples.org`
+- `gdb-tutorial-with-fibonacci.org`
+
+For the repository:
+- `gdb-game-ai/tutorials/gdb-basics.org`
+- `gdb-game-ai/docs/gdb-tutorial.org`
+- `gdb-game-ai/examples/fibonacci-debugging.org`
+#+end_src
