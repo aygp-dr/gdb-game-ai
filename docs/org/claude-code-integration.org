@@ -1,0 +1,909 @@
+#+TITLE: Claude Code GDB Integration Framework
+#+PROPERTY: header-args :mkdirp yes
+
+* Project Structure
+
+#+begin_src bash :tangle gdb-game-ai/setup-claude-code.sh :mkdirp t :shebang #!/bin/sh
+#!/bin/sh
+# Setup for Claude Code integration with GDB
+
+echo "Setting up Claude Code GDB integration..."
+
+# Create directory structure
+mkdir -p experiments/{01-source-analysis,02-memory-search,03-ai-testing}
+mkdir -p src/{python,scheme,analysis}
+mkdir -p logs
+mkdir -p tools
+
+# Download 2048 source for analysis
+echo "Downloading 2048-cli source..."
+cd /tmp
+wget https://codeload.github.com/Tiehuis/2048-cli/tar.gz/v0.9.1 -O 2048-cli.tar.gz
+tar -xzf 2048-cli.tar.gz
+cd -
+cp -r /tmp/2048-cli-0.9.1 ./2048-source
+
+echo "Setup complete!"
+#+end_src
+
+* Source Code Analyzer
+
+#+begin_src python :tangle gdb-game-ai/src/python/analyze_2048_source.py :mkdirp t
+#!/usr/bin/env python3
+"""
+Analyze 2048-cli source code to understand memory layout.
+This helps Claude Code understand the game structure.
+"""
+
+import os
+import re
+import json
+from pathlib import Path
+
+class SourceAnalyzer:
+    def __init__(self, source_dir="2048-source"):
+        self.source_dir = Path(source_dir)
+        self.structures = {}
+        self.globals = {}
+        self.key_functions = {}
+        
+    def analyze_all(self):
+        """Run all analysis steps."""
+        print("🔍 Analyzing 2048-cli source code...")
+        
+        # Find main structures
+        self.find_structures()
+        self.find_globals()
+        self.find_key_functions()
+        self.analyze_memory_layout()
+        
+        # Save results
+        results = {
+            "structures": self.structures,
+            "globals": self.globals,
+            "functions": self.key_functions,
+            "memory_hints": self.get_memory_hints()
+        }
+        
+        with open("experiments/01-source-analysis/structure_analysis.json", "w") as f:
+            json.dump(results, f, indent=2)
+            
+        return results
+    
+    def find_structures(self):
+        """Find struct definitions."""
+        print("📊 Finding structures...")
+        
+        for c_file in self.source_dir.glob("src/*.c"):
+            with open(c_file, 'r') as f:
+                content = f.read()
+                
+            # Find struct definitions
+            struct_pattern = r'struct\s+(\w+)\s*\{([^}]+)\}'
+            for match in re.finditer(struct_pattern, content, re.DOTALL):
+                struct_name = match.group(1)
+                struct_body = match.group(2)
+                
+                # Parse fields
+                fields = []
+                field_pattern = r'(\w+)\s+(\w+)(?:\[([^\]]+)\])?(?:\[([^\]]+)\])?;'
+                for field in re.finditer(field_pattern, struct_body):
+                    field_info = {
+                        "type": field.group(1),
+                        "name": field.group(2),
+                        "array_dims": []
+                    }
+                    if field.group(3):
+                        field_info["array_dims"].append(field.group(3))
+                    if field.group(4):
+                        field_info["array_dims"].append(field.group(4))
+                    fields.append(field_info)
+                
+                self.structures[struct_name] = {
+                    "file": c_file.name,
+                    "fields": fields
+                }
+        
+        # Also check headers
+        for h_file in self.source_dir.glob("src/*.h"):
+            with open(h_file, 'r') as f:
+                content = f.read()
+                
+            # Look for board/game definitions
+            if "board" in content.lower() or "game" in content.lower():
+                print(f"  Found relevant header: {h_file.name}")
+                # Extract #defines for board size
+                for match in re.finditer(r'#define\s+(BOARD_\w+|SIZE\w*)\s+(\d+)', content):
+                    print(f"    {match.group(1)} = {match.group(2)}")
+    
+    def find_globals(self):
+        """Find global variables."""
+        print("🌐 Finding global variables...")
+        
+        for c_file in self.source_dir.glob("src/*.c"):
+            with open(c_file, 'r') as f:
+                content = f.read()
+            
+            # Find globals (simplified - looks for common patterns)
+            # Look for declarations outside functions
+            lines = content.split('\n')
+            in_function = False
+            brace_count = 0
+            
+            for line in lines:
+                # Track if we're in a function
+                brace_count += line.count('{') - line.count('}')
+                if '{' in line and '(' in line:
+                    in_function = True
+                elif brace_count == 0:
+                    in_function = False
+                
+                # Look for variable declarations outside functions
+                if not in_function and brace_count == 0:
+                    # Common patterns for game state
+                    if any(keyword in line for keyword in ['board', 'game', 'score', 'grid']):
+                        if 'int' in line or 'long' in line or 'struct' in line:
+                            print(f"  Potential global in {c_file.name}: {line.strip()}")
+                            self.globals[c_file.name] = self.globals.get(c_file.name, [])
+                            self.globals[c_file.name].append(line.strip())
+    
+    def find_key_functions(self):
+        """Find key game functions."""
+        print("🔧 Finding key functions...")
+        
+        important_funcs = ['main', 'init', 'move', 'merge', 'add', 'draw', 'input', 'getch', 'score']
+        
+        for c_file in self.source_dir.glob("src/*.c"):
+            with open(c_file, 'r') as f:
+                content = f.read()
+            
+            # Find function definitions
+            func_pattern = r'(\w+\s+\*?\s*)(\w+)\s*\([^)]*\)\s*\{'
+            for match in re.finditer(func_pattern, content):
+                func_name = match.group(2)
+                return_type = match.group(1).strip()
+                
+                # Check if it's an important function
+                if any(keyword in func_name.lower() for keyword in important_funcs):
+                    self.key_functions[func_name] = {
+                        "file": c_file.name,
+                        "return_type": return_type
+                    }
+                    print(f"  Found: {return_type} {func_name}() in {c_file.name}")
+    
+    def analyze_memory_layout(self):
+        """Analyze the likely memory layout."""
+        print("💾 Analyzing memory layout...")
+        
+        # Look specifically for the game board
+        for c_file in self.source_dir.glob("src/*.c"):
+            if 'engine' in c_file.name or 'game' in c_file.name:
+                with open(c_file, 'r') as f:
+                    content = f.read()
+                
+                # Look for 4x4 arrays or 16-element arrays
+                if '4][4]' in content or '[16]' in content:
+                    print(f"  Found board definition in {c_file.name}")
+                    
+                    # Extract the specific lines
+                    for line in content.split('\n'):
+                        if ('4][4]' in line or '[16]' in line) and ('int' in line or 'board' in line):
+                            print(f"    {line.strip()}")
+    
+    def get_memory_hints(self):
+        """Generate hints for finding the board in memory."""
+        hints = []
+        
+        # Based on common patterns
+        hints.append("Board is likely a 4x4 int array (64 bytes total)")
+        hints.append("Empty cells are probably 0")
+        hints.append("Cell values are powers of 2: 2, 4, 8, 16, 32...")
+        hints.append("Score is likely a 'long' type (8 bytes)")
+        hints.append("Look for 16 consecutive integers in memory")
+        
+        return hints
+
+if __name__ == "__main__":
+    analyzer = SourceAnalyzer()
+    results = analyzer.analyze_all()
+    
+    print("\n📋 Analysis Summary:")
+    print(f"  Found {len(results['structures'])} structures")
+    print(f"  Found {sum(len(v) for v in results['globals'].values())} potential globals")
+    print(f"  Found {len(results['functions'])} key functions")
+    
+    print("\n💡 Memory Search Hints:")
+    for hint in results['memory_hints']:
+        print(f"  - {hint}")
+#+end_src
+
+* GDB Python Bridge for Claude Code
+
+#+begin_src python :tangle gdb-game-ai/src/python/gdb_bridge.py :mkdirp t
+#!/usr/bin/env python3
+"""
+GDB Bridge - Allows Claude Code to interact with GDB programmatically.
+"""
+
+import subprocess
+import time
+import re
+import json
+from pathlib import Path
+
+class GDBBridge:
+    def __init__(self, binary_path="/usr/local/bin/2048"):
+        self.binary = binary_path
+        self.gdb_process = None
+        self.board_address = None
+        self.log_file = Path("logs/gdb_session.log")
+        self.log_file.parent.mkdir(exist_ok=True)
+        
+    def start(self):
+        """Start GDB process."""
+        print("🚀 Starting GDB...")
+        self.gdb_process = subprocess.Popen(
+            ["gdb", "-q", self.binary],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=0
+        )
+        time.sleep(0.5)
+        
+        # Initial setup
+        self.send_command("set pagination off")
+        self.send_command("set print pretty on")
+        
+    def send_command(self, cmd):
+        """Send command to GDB and return output."""
+        if not self.gdb_process:
+            return None
+            
+        with open(self.log_file, 'a') as log:
+            log.write(f"\n>>> {cmd}\n")
+            
+        self.gdb_process.stdin.write(cmd + "\n")
+        self.gdb_process.stdin.flush()
+        
+        # Collect output (simple approach - may need refinement)
+        time.sleep(0.1)
+        output = ""
+        
+        # Read available output
+        import select
+        while True:
+            ready, _, _ = select.select([self.gdb_process.stdout], [], [], 0.1)
+            if ready:
+                line = self.gdb_process.stdout.readline()
+                output += line
+                if "(gdb)" in line:
+                    break
+            else:
+                break
+                
+        with open(self.log_file, 'a') as log:
+            log.write(output)
+            
+        return output
+    
+    def find_board_pattern(self, pattern):
+        """Search memory for a board pattern."""
+        print(f"🔍 Searching for pattern: {pattern}")
+        
+        # Convert pattern to search command
+        search_values = " ".join(str(v) for v in pattern)
+        cmd = f"find /w 0x400000, 0x700000, {search_values}"
+        
+        output = self.send_command(cmd)
+        
+        # Parse addresses from output
+        addresses = []
+        for line in output.split('\n'):
+            if "0x" in line:
+                match = re.search(r'(0x[0-9a-fA-F]+)', line)
+                if match:
+                    addresses.append(match.group(1))
+        
+        return addresses
+    
+    def examine_memory(self, address, count=16):
+        """Examine memory at address."""
+        cmd = f"x/{count}wx {address}"
+        output = self.send_command(cmd)
+        
+        # Parse values
+        values = []
+        for line in output.split('\n'):
+            if "0x" in line and ":" in line:
+                # Extract hex values after the colon
+                parts = line.split(':')[1].strip().split()
+                for part in parts:
+                    if part.startswith('0x'):
+                        values.append(int(part, 16))
+        
+        return values
+    
+    def verify_board_address(self, address):
+        """Verify if address contains a valid game board."""
+        values = self.examine_memory(address, 16)
+        
+        if len(values) != 16:
+            return False
+            
+        # Check if it looks like a game board
+        # - All values should be 0 or powers of 2
+        # - Should have some zeros (empty cells)
+        # - Should have some non-zeros (tiles)
+        
+        zeros = sum(1 for v in values if v == 0)
+        powers_of_2 = sum(1 for v in values if v > 0 and (v & (v-1)) == 0)
+        
+        return zeros > 0 and zeros < 16 and (zeros + powers_of_2) == 16
+    
+    def set_ai_breakpoint(self):
+        """Set breakpoint for AI intervention."""
+        print("🎯 Setting AI breakpoint...")
+        
+        # Set breakpoint on input function
+        self.send_command("break wgetch")
+        
+        # Add commands to call our AI
+        commands = [
+            "commands",
+            "silent",
+            "python",
+            "# AI will be called here",
+            "end",
+            "end"
+        ]
+        
+        for cmd in commands:
+            self.send_command(cmd)
+
+class Experiment:
+    """Base class for experiments."""
+    
+    def __init__(self, name, description):
+        self.name = name
+        self.description = description
+        self.results = {}
+        
+    def run(self, gdb_bridge):
+        """Override in subclasses."""
+        raise NotImplementedError
+        
+    def save_results(self):
+        """Save experiment results."""
+        output_dir = Path(f"experiments/{self.name}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        with open(output_dir / "results.json", 'w') as f:
+            json.dump(self.results, f, indent=2)
+
+class FindBoardExperiment(Experiment):
+    """Experiment to find the game board in memory."""
+    
+    def __init__(self):
+        super().__init__(
+            "02-memory-search",
+            "Find game board in memory using various strategies"
+        )
+        
+    def run(self, gdb_bridge):
+        print(f"\n🧪 Running experiment: {self.description}")
+        
+        # Start the game
+        gdb_bridge.send_command("run")
+        time.sleep(1)
+        
+        # Try to break and search
+        gdb_bridge.send_command("Ctrl+C")  # This won't work - need different approach
+        
+        # Strategy 1: Search for common patterns
+        strategies = [
+            ("zeros", [0, 0, 0, 0]),
+            ("small_values", [2, 0, 0, 2]),
+            ("power_of_2", [16]),
+            ("sequence", [0, 2, 4, 8])
+        ]
+        
+        found_addresses = {}
+        
+        for name, pattern in strategies:
+            print(f"\n  Strategy: {name}")
+            addrs = gdb_bridge.find_board_pattern(pattern)
+            found_addresses[name] = addrs
+            print(f"    Found {len(addrs)} matches")
+            
+            # Check each address
+            for addr in addrs[:5]:  # Check first 5
+                values = gdb_bridge.examine_memory(addr, 16)
+                if gdb_bridge.verify_board_address(addr):
+                    print(f"    ✅ {addr} looks like a game board!")
+                    self.results["board_address"] = addr
+                    self.results["board_values"] = values
+                    return
+        
+        self.results["search_results"] = found_addresses
+        self.save_results()
+
+# Main experiment runner
+def run_experiments():
+    """Run all experiments."""
+    print("🔬 Claude Code GDB Experiment Runner")
+    print("=" * 50)
+    
+    # First analyze source
+    from analyze_2048_source import SourceAnalyzer
+    analyzer = SourceAnalyzer()
+    source_results = analyzer.analyze_all()
+    
+    # Start GDB
+    bridge = GDBBridge()
+    bridge.start()
+    
+    # Run experiments
+    experiments = [
+        FindBoardExperiment(),
+    ]
+    
+    for exp in experiments:
+        exp.run(bridge)
+        
+    print("\n✅ Experiments complete! Check experiments/ directory for results.")
+
+if __name__ == "__main__":
+    run_experiments()
+#+end_src
+
+* Claude Code Interaction Script
+
+#+begin_src python :tangle gdb-game-ai/claude_code_interface.py :mkdirp t
+#!/usr/bin/env python3
+"""
+Claude Code Interface - High-level interface for Claude Code to interact with 2048 via GDB.
+"""
+
+import json
+from pathlib import Path
+from src.python.gdb_bridge import GDBBridge
+from src.python.analyze_2048_source import SourceAnalyzer
+
+class ClaudeCodeInterface:
+    """
+    High-level interface designed for Claude Code interaction.
+    Provides simple methods that Claude Code can call to explore and control the game.
+    """
+    
+    def __init__(self):
+        self.gdb = None
+        self.board_address = None
+        self.source_analysis = None
+        
+    def analyze_source(self):
+        """
+        Step 1: Analyze the source code to understand the game structure.
+        Returns a summary that Claude Code can use.
+        """
+        print("📚 Analyzing 2048 source code...")
+        analyzer = SourceAnalyzer()
+        self.source_analysis = analyzer.analyze_all()
+        
+        # Create Claude-friendly summary
+        summary = {
+            "likely_board_structure": "int board[4][4] or similar",
+            "board_size_bytes": 64,
+            "hints_for_finding_board": self.source_analysis["memory_hints"],
+            "key_functions": list(self.source_analysis["functions"].keys()),
+            "next_steps": [
+                "Use find_board() to locate the board in memory",
+                "Once found, use read_board() to get current state",
+                "Use make_move() to have the AI play"
+            ]
+        }
+        
+        return summary
+    
+    def start_game(self):
+        """
+        Step 2: Start the game under GDB control.
+        """
+        print("🎮 Starting 2048 under GDB control...")
+        self.gdb = GDBBridge()
+        self.gdb.start()
+        
+        # Run the game
+        self.gdb.send_command("run")
+        
+        return "Game started. Use find_board() next."
+    
+    def find_board(self, hint_value=None):
+        """
+        Step 3: Find the game board in memory.
+        
+        Args:
+            hint_value: A value you see on the board (like 16 or 32) to help narrow search
+        """
+        print(f"🔍 Searching for game board{' with hint: ' + str(hint_value) if hint_value else ''}...")
+        
+        if not self.gdb:
+            return "Error: Start game first with start_game()"
+        
+        # Try different search strategies
+        candidates = []
+        
+        if hint_value:
+            # Search for the specific value
+            addrs = self.gdb.find_board_pattern([hint_value])
+            for addr in addrs:
+                # Check addresses around it
+                for offset in range(-60, 4, 4):  # Check up to 15 integers before
+                    check_addr = hex(int(addr, 16) + offset)
+                    if self._check_if_board(check_addr):
+                        candidates.append(check_addr)
+        
+        # Also try common patterns
+        patterns = [
+            [0, 0, 0, 2],  # Common starting pattern
+            [2, 0, 0, 2],
+            [0, 2, 4, 0]
+        ]
+        
+        for pattern in patterns:
+            addrs = self.gdb.find_board_pattern(pattern)
+            for addr in addrs:
+                if self._check_if_board(addr):
+                    candidates.append(addr)
+        
+        if candidates:
+            self.board_address = candidates[0]
+            return {
+                "found": True,
+                "address": self.board_address,
+                "candidates": candidates[:5],
+                "next_step": "Use read_board() to see the current state"
+            }
+        else:
+            return {
+                "found": False,
+                "hint": "Try providing a unique value from the board as hint_value",
+                "example": "find_board(hint_value=16)"
+            }
+    
+    def _check_if_board(self, addr):
+        """Check if an address contains a valid board."""
+        try:
+            values = self.gdb.examine_memory(addr, 16)
+            return self.gdb.verify_board_address(addr)
+        except:
+            return False
+    
+    def read_board(self):
+        """
+        Step 4: Read the current board state.
+        """
+        if not self.board_address:
+            return "Error: Find board first with find_board()"
+        
+        values = self.gdb.examine_memory(self.board_address, 16)
+        
+        # Format as 4x4 grid
+        board = []
+        for i in range(4):
+            row = values[i*4:(i+1)*4]
+            board.append(row)
+        
+        # Pretty print
+        print("\nCurrent Board:")
+        for row in board:
+            print(" ".join(f"{v:4d}" if v > 0 else "   ." for v in row))
+        
+        return {
+            "board": board,
+            "flat": values,
+            "empty_cells": sum(1 for v in values if v == 0),
+            "max_tile": max(values) if values else 0
+        }
+    
+    def make_move(self, direction="auto"):
+        """
+        Step 5: Make a move.
+        
+        Args:
+            direction: "up", "down", "left", "right", or "auto" for AI choice
+        """
+        if not self.board_address:
+            return "Error: Find board first with find_board()"
+        
+        # Read current board
+        board_state = self.read_board()
+        
+        if direction == "auto":
+            # Simple AI strategy
+            direction = self._choose_best_move(board_state["flat"])
+        
+        # Map direction to key
+        key_map = {
+            "up": "w",
+            "down": "s", 
+            "left": "a",
+            "right": "d"
+        }
+        
+        key = key_map.get(direction, "s")
+        
+        # Inject the key at next input
+        print(f"🎯 Making move: {direction} (key: {key})")
+        
+        # This is simplified - in practice we'd set up proper breakpoint handling
+        self.gdb.send_command(f"call (void)printf(\"\\n\")")  # Trigger refresh
+        
+        return f"Move {direction} queued. Board should update soon."
+    
+    def _choose_best_move(self, board):
+        """Simple AI to choose move."""
+        # Very basic: prefer down and right to keep tiles in corner
+        # In practice, would implement minimax or expectimax
+        return "down"  # Simplified
+    
+    def run_experiment(self, name="auto_play", moves=10):
+        """
+        Run an experiment.
+        
+        Args:
+            name: Experiment name
+            moves: Number of moves to make
+        """
+        results = {
+            "experiment": name,
+            "moves": [],
+            "scores": []
+        }
+        
+        for i in range(moves):
+            board_state = self.read_board()
+            results["moves"].append(board_state)
+            
+            move = self.make_move("auto")
+            print(f"Move {i+1}/{moves}: {move}")
+            
+            # Wait a bit for game to update
+            import time
+            time.sleep(0.5)
+        
+        # Save results
+        exp_dir = Path(f"experiments/03-ai-testing/{name}")
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        
+        with open(exp_dir / "results.json", 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        return f"Experiment '{name}' complete. Results saved."
+
+# Quick start functions for Claude Code
+def quick_start():
+    """Quick start for Claude Code."""
+    interface = ClaudeCodeInterface()
+    
+    print("🚀 2048 AI Quick Start")
+    print("=" * 50)
+    print("\n1️⃣ First, analyze the source:")
+    print("   summary = interface.analyze_source()")
+    print("\n2️⃣ Start the game:")
+    print("   interface.start_game()")
+    print("\n3️⃣ Find the board (look at the game and pick a unique number):")
+    print("   interface.find_board(hint_value=16)")
+    print("\n4️⃣ Read the board:")
+    print("   interface.read_board()")
+    print("\n5️⃣ Make moves:")
+    print("   interface.make_move('down')")
+    print("   interface.make_move('auto')  # AI chooses")
+    print("\n6️⃣ Run experiment:")
+    print("   interface.run_experiment('test', moves=20)")
+    
+    return interface
+
+if __name__ == "__main__":
+    # Create an instance for Claude Code to use
+    interface = quick_start()
+#+end_src
+
+* Next Steps Document
+
+#+begin_src markdown :tangle gdb-game-ai/NEXT_STEPS.md :mkdirp t
+# Next Steps for 2048 AI Development
+
+## Immediate Tasks
+
+1. **Source Analysis** ✅
+   - Run `analyze_2048_source.py` to understand the code structure
+   - Look at the generated `structure_analysis.json`
+   - Key files to examine: `engine.c`, `gfx_curses.c`
+
+2. **Board Discovery** 
+   - Use `claude_code_interface.py` to find the board systematically
+   - Try multiple search strategies
+   - Verify the board address by checking the pattern
+
+3. **AI Implementation**
+   - Simple strategy: Down > Right > Left > Up
+   - Advanced: Implement expectimax algorithm
+   - Ultra: Use ML model trained on successful games
+
+## Experiments to Run
+
+### Experiment 1: Board Structure
+- Goal: Definitively locate the board in memory
+- Method: Search for known patterns, verify with visual board
+- Output: Exact memory address and layout
+
+### Experiment 2: Input Mechanics  
+- Goal: Understand how input is processed
+- Method: Trace through wgetch, find key processing
+- Output: Reliable method to inject moves
+
+### Experiment 3: AI Strategies
+- Goal: Compare different AI approaches
+- Strategies to test:
+  - Corner strategy (keep highest in corner)
+  - Snake pattern
+  - Expectimax with different depths
+  - Monte Carlo sampling
+
+### Experiment 4: Learning
+- Goal: Train AI to improve over time
+- Method: Record game states and outcomes
+- Use successful games to train decision model
+
+## Code Improvements
+
+1. **Better Memory Search**
+   ```python
+   # More sophisticated board finding
+   def find_board_advanced(gdb):
+       # Check data segment
+       # Look for 16 consecutive ints
+       # Verify power-of-2 pattern
+   ```
+
+2. **Robust Input Injection**
+   ```python
+   # Set up proper breakpoint handling
+   def setup_ai_control(gdb):
+       gdb.send("break wgetch")
+       gdb.send("commands")
+       # ... AI logic
+   ```
+
+3. **Game State Tracking**
+   ```python
+   class GameState:
+       def __init__(self):
+           self.history = []
+           self.scores = []
+           self.max_tile_achieved = 0
+   ```
+
+## Advanced Ideas
+
+1. **Parallel Exploration**: Run multiple GDB instances to test strategies
+2. **State Space Analysis**: Map all possible board states from position
+3. **Optimal Play Proof**: Prove certain positions guarantee 2048
+4. **Speed Running**: Optimize for fastest 2048 achievement
+5. **Pattern Library**: Build library of board patterns and best moves
+
+## Integration Ideas
+
+1. **Web Dashboard**: Real-time visualization of AI playing
+2. **Twitch Bot**: Stream AI playing 2048
+3. **Training Mode**: AI teaches human optimal moves
+4. **Puzzle Mode**: Set up specific board states to solve
+
+## Research Questions
+
+1. What's the theoretical maximum score?
+2. Can we predict RNG (tile spawning)?
+3. What's the optimal depth for expectimax?
+4. How much does corner strategy matter?
+5. Can we find forced-win positions?
+
+## Tools to Build
+
+1. **Board Visualizer**: Show board state in GDB
+2. **Move Validator**: Ensure moves are legal
+3. **Strategy Analyzer**: Compare different approaches
+4. **Game Replayer**: Replay saved games
+5. **Pattern Matcher**: Find recurring patterns
+
+## Next Session Goals
+
+When you next work with Claude Code:
+
+1. Run the source analyzer
+2. Use the interface to find the board
+3. Implement basic AI
+4. Run 100-game experiment
+5. Analyze results
+6. Iterate on strategy
+
+Remember: The goal is not just to play 2048, but to understand it deeply and push the boundaries of what's possible!
+#+end_src
+
+* README for the Project
+
+#+begin_src markdown :tangle gdb-game-ai/README.md :mkdirp t
+# GDB Game AI - 2048 Analysis Framework
+
+This project provides a framework for Claude Code to interact with games through GDB, starting with 2048.
+
+## Quick Start
+
+```bash
+# Setup
+./setup-claude-code.sh
+
+# Analyze source
+python3 src/python/analyze_2048_source.py
+
+# Start interactive session
+python3 claude_code_interface.py
+```
+
+## Project Structure
+
+```
+gdb-game-ai/
+├── experiments/          # Experiment results
+│   ├── 01-source-analysis/
+│   ├── 02-memory-search/
+│   └── 03-ai-testing/
+├── src/
+│   ├── python/          # Python tools
+│   │   ├── analyze_2048_source.py
+│   │   └── gdb_bridge.py
+│   └── scheme/          # Guile Scheme GDB scripts
+├── 2048-source/         # Source code for analysis
+├── logs/                # GDB session logs
+└── claude_code_interface.py  # Main interface
+```
+
+## For Claude Code
+
+Use `claude_code_interface.py` as your main entry point:
+
+```python
+from claude_code_interface import ClaudeCodeInterface
+
+# Create interface
+interface = ClaudeCodeInterface()
+
+# Follow the steps
+summary = interface.analyze_source()
+interface.start_game()
+interface.find_board(hint_value=16)  # Use a value you see
+board = interface.read_board()
+interface.make_move("auto")
+```
+
+## Experiments
+
+See `NEXT_STEPS.md` for experiment ideas and research questions.
+
+## Contributing
+
+This is designed for experimentation. Feel free to:
+- Add new analysis tools
+- Implement better AI strategies  
+- Create new experiments
+- Document findings
+
+## Goal
+
+Transform 2048 from a simple game into a deeply understood system where we can:
+- Predict optimal moves
+- Prove winning strategies
+- Push scoring boundaries
+- Learn about AI and reverse engineering
+#+end_src

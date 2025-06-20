@@ -1,0 +1,157 @@
+* Repository Structure and Tangle Plan
+
+** From claude-code-integration.org - Core infrastructure
+#+begin_src bash
+# In Emacs, open claude-code-integration.org and C-c C-v t to tangle:
+
+# Should create:
+src/python/analyze_2048_source.py    # Source code analyzer
+src/python/gdb_bridge.py             # GDB Python bridge
+claude_code_interface.py             # Main Claude Code interface  
+experiments/                         # Experiments directory structure
+NEXT_STEPS.md                       # Research roadmap
+README.md                           # Project documentation
+setup-claude-code.sh                # Setup script
+#+end_src
+
+** From gdb-web-bridge.org - Web API components
+#+begin_src bash
+# Should create:
+gdb_web_bridge.py                   # Flask web server
+claude_client.py                    # HTTP client for Claude Code
+setup_web_bridge.sh                 # Setup script
+WEB_BRIDGE_README.md               # API documentation
+#+end_src
+
+** From controller.org - Game controllers
+#+begin_src bash
+# Should create:
+src/scheme/game-ai.scm              # Guile Scheme AI framework
+src/scheme/umoria-ai.scm            # Umoria-specific AI
+src/scheme/2048-ai.scm              # 2048 Scheme controller
+.gdbinit                           # GDB initialization
+Makefile                           # Build configuration
+#+end_src
+
+** From 2048-gdb-python-controller.org - 2048 specific
+#+begin_src bash
+# Should create:
+src/scheme/2048-cli-ai.scm          # 2048 CLI controller
+test-2048.sh                        # Testing script
+manual-2048-test.gdb               # Manual test commands
+analyze-2048.c                     # Structure analysis helper
+#+end_src
+
+** Additional structure to create
+#+begin_src bash :tangle setup-repo-structure.sh
+#!/bin/bash
+# Create complete repository structure
+
+# Create directories
+mkdir -p src/{python,scheme,c,gdb}
+mkdir -p experiments/{01-source-analysis,02-memory-search,03-ai-testing}
+mkdir -p docs/{api,tutorials,research}
+mkdir -p tests/{unit,integration}
+mkdir -p games/{2048,umoria,nethack}
+mkdir -p logs
+mkdir -p tools
+mkdir -p web/{static,templates}
+
+# Move existing files to proper locations
+mv 2048-ai.py src/python/
+mv *.gdb src/gdb/
+mv simple-ai*.gdb src/gdb/
+
+# Create main entry points
+cat > run.py << 'EOF'
+#!/usr/bin/env python3
+"""Main entry point for GDB Game AI"""
+
+import sys
+from src.python.gdb_bridge import GDBBridge
+from claude_code_interface import ClaudeCodeInterface
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "web":
+        from gdb_web_bridge import app
+        app.run(debug=True)
+    else:
+        # Interactive mode
+        interface = ClaudeCodeInterface()
+        print("GDB Game AI Interface")
+        print("Use: interface.start_game(), interface.find_board(), etc.")
+        return interface
+
+if __name__ == "__main__":
+    main()
+EOF
+
+# Create comprehensive .gitignore
+cat > .gitignore << 'EOF'
+# Compiled files
+*.o
+*.so
+*.pyc
+__pycache__/
+build/
+
+# GDB files
+.gdb_history
+core
+*.core
+
+# Game binaries
+fibonacci
+2048
+umoria
+
+# Logs
+logs/*.log
+*.log
+
+# Experiments output
+experiments/*/results.json
+experiments/*/output/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+venv/
+.env
+*.egg-info/
+dist/
+EOF
+
+# Create requirements.txt
+cat > requirements.txt << 'EOF'
+flask>=2.0.0
+requests>=2.25.0
+pytest>=6.0.0
+psutil>=5.8.0
+EOF
+
+# Create pytest configuration
+cat > pytest.ini << 'EOF'
+[pytest]
+testpaths = tests
+python_files = test_*.py
+python_classes = Test*
+python_functions = test_*
+EOF
+
+# Make scripts executable
+chmod +x setup-claude-code.sh
+chmod +x setup_web_bridge.sh
+chmod +x test-2048.sh
+chmod +x run.py
+
+echo "Repository structure created!"
+#+end_src

@@ -1,0 +1,393 @@
+#+TITLE: GDB Web Bridge for Claude Code Integration
+
+* GDB Web Bridge
+
+This creates a web interface that Claude Code can interact with via HTTP requests.
+
+#+begin_src python :tangle gdb-game-ai/gdb_web_bridge.py :mkdirp t
+#!/usr/bin/env python3
+"""
+GDB Web Bridge - Allows Claude Code to interact with GDB via HTTP
+"""
+
+from flask import Flask, request, jsonify
+import subprocess
+import threading
+import queue
+import time
+import re
+
+app = Flask(__name__)
+
+class GDBController:
+    def __init__(self):
+        self.process = None
+        self.output_queue = queue.Queue()
+        self.board_address = None
+        
+    def start(self, binary="/usr/local/bin/2048"):
+        """Start GDB process."""
+        self.process = subprocess.Popen(
+            ["gdb", "-q", binary],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=0
+        )
+        
+        # Start output reader thread
+        threading.Thread(target=self._read_output, daemon=True).start()
+        
+        # Load Python AI
+        self.send_command("source 2048-ai.py")
+        
+        return {"status": "started", "pid": self.process.pid}
+    
+    def _read_output(self):
+        """Read GDB output in background."""
+        while self.process and self.process.poll() is None:
+            line = self.process.stdout.readline()
+            if line:
+                self.output_queue.put(line.strip())
+    
+    def send_command(self, cmd):
+        """Send command to GDB."""
+        if not self.process:
+            return {"error": "GDB not running"}
+            
+        self.process.stdin.write(cmd + "\n")
+        self.process.stdin.flush()
+        
+        # Collect output
+        output = []
+        time.sleep(0.5)  # Give GDB time to respond
+        
+        while not self.output_queue.empty():
+            try:
+                line = self.output_queue.get_nowait()
+                output.append(line)
+            except queue.Empty:
+                break
+                
+        return {"command": cmd, "output": output}
+    
+    def get_board(self):
+        """Get current board state."""
+        result = self.send_command("python game_board.read_board(); print(game_board.board)")
+        
+        # Parse board from output
+        board_str = " ".join(result.get("output", []))
+        
+        # Extract numbers from the output
+        numbers = re.findall(r'\d+', board_str)
+        
+        if len(numbers) >= 16:
+            board = [int(n) for n in numbers[:16]]
+            # Format as 4x4
+            formatted = []
+            for i in range(4):
+                formatted.append(board[i*4:(i+1)*4])
+            return {"board": formatted, "flat": board}
+        
+        return {"error": "Could not read board"}
+
+# Global controller
+gdb = GDBController()
+
+# API Routes
+
+@app.route('/start', methods=['POST'])
+def start_gdb():
+    """Start GDB with 2048."""
+    return jsonify(gdb.start())
+
+@app.route('/command', methods=['POST'])
+def send_command():
+    """Send command to GDB."""
+    data = request.json
+    cmd = data.get('command', '')
+    return jsonify(gdb.send_command(cmd))
+
+@app.route('/run', methods=['POST'])
+def run_game():
+    """Start the game."""
+    return jsonify(gdb.send_command("run"))
+
+@app.route('/break', methods=['POST'])
+def break_execution():
+    """Send interrupt signal."""
+    if gdb.process:
+        gdb.process.send_signal(subprocess.signal.SIGINT)
+        time.sleep(0.5)
+        return jsonify({"status": "interrupted"})
+    return jsonify({"error": "GDB not running"})
+
+@app.route('/find-board', methods=['POST'])
+def find_board():
+    """Find the game board."""
+    return jsonify(gdb.send_command("find-board"))
+
+@app.route('/board', methods=['GET'])
+def get_board():
+    """Get current board state."""
+    return jsonify(gdb.get_board())
+
+@app.route('/move', methods=['POST'])
+def make_move():
+    """Make a move."""
+    data = request.json
+    direction = data.get('direction', 'auto')
+    
+    # Map directions to keys
+    moves = {
+        'up': 'w',
+        'down': 's',
+        'left': 'a',
+        'right': 'd',
+        'auto': 'auto'
+    }
+    
+    if direction == 'auto':
+        # Use AI to decide
+        gdb.send_command("python move = ai.choose_move()")
+        return jsonify({"status": "AI choosing move"})
+    else:
+        key = moves.get(direction, 's')
+        gdb.send_command(f"return (int){ord(key)}")
+        return jsonify({"status": f"moved {direction}"})
+
+@app.route('/ai-enable', methods=['POST'])
+def enable_ai():
+    """Enable AI auto-play."""
+    return jsonify(gdb.send_command("ai-2048"))
+
+@app.route('/continue', methods=['POST'])
+def continue_execution():
+    """Continue execution."""
+    return jsonify(gdb.send_command("continue"))
+
+@app.route('/status', methods=['GET'])
+def get_status():
+    """Get GDB status."""
+    if gdb.process and gdb.process.poll() is None:
+        return jsonify({"status": "running", "pid": gdb.process.pid})
+    return jsonify({"status": "not running"})
+
+if __name__ == '__main__':
+    print("🌐 GDB Web Bridge")
+    print("=" * 40)
+    print("API Endpoints:")
+    print("  POST /start        - Start GDB with 2048")
+    print("  POST /run          - Run the game")
+    print("  POST /break        - Interrupt execution")
+    print("  POST /find-board   - Find game board")
+    print("  GET  /board        - Get current board")
+    print("  POST /move         - Make a move")
+    print("  POST /ai-enable    - Enable AI")
+    print("  POST /continue     - Continue execution")
+    print("  GET  /status       - Get GDB status")
+    print("\nStarting server on http://localhost:5000")
+    
+    app.run(debug=True, port=5000)
+#+end_src
+
+* Claude Code Client
+
+#+begin_src python :tangle gdb-game-ai/claude_client.py :mkdirp t
+#!/usr/bin/env python3
+"""
+Client for Claude Code to interact with GDB Web Bridge
+"""
+
+import requests
+import json
+import time
+
+class GDB2048Client:
+    def __init__(self, base_url="http://localhost:5000"):
+        self.base_url = base_url
+        
+    def start(self):
+        """Start GDB with 2048."""
+        r = requests.post(f"{self.base_url}/start")
+        return r.json()
+    
+    def run(self):
+        """Run the game."""
+        r = requests.post(f"{self.base_url}/run")
+        return r.json()
+    
+    def interrupt(self):
+        """Interrupt the game."""
+        r = requests.post(f"{self.base_url}/break")
+        return r.json()
+    
+    def find_board(self):
+        """Find the board in memory."""
+        r = requests.post(f"{self.base_url}/find-board")
+        return r.json()
+    
+    def get_board(self):
+        """Get current board state."""
+        r = requests.get(f"{self.base_url}/board")
+        return r.json()
+    
+    def move(self, direction="auto"):
+        """Make a move."""
+        r = requests.post(f"{self.base_url}/move", 
+                         json={"direction": direction})
+        return r.json()
+    
+    def enable_ai(self):
+        """Enable AI auto-play."""
+        r = requests.post(f"{self.base_url}/ai-enable")
+        return r.json()
+    
+    def continue_execution(self):
+        """Continue game execution."""
+        r = requests.post(f"{self.base_url}/continue")
+        return r.json()
+    
+    def play_game(self, moves=50):
+        """Play a full game with AI."""
+        print("🎮 Starting 2048 AI Game")
+        
+        # Start GDB
+        print("Starting GDB...")
+        self.start()
+        time.sleep(1)
+        
+        # Run game
+        print("Running game...")
+        self.run()
+        time.sleep(2)
+        
+        # Find board
+        print("Finding board...")
+        self.interrupt()
+        time.sleep(0.5)
+        self.find_board()
+        
+        # Enable AI
+        print("Enabling AI...")
+        self.enable_ai()
+        
+        # Continue and let AI play
+        print("AI is playing...")
+        self.continue_execution()
+        
+        # Monitor progress
+        for i in range(moves):
+            time.sleep(1)
+            try:
+                board = self.get_board()
+                if "board" in board:
+                    print(f"\nMove {i+1}:")
+                    self.print_board(board["board"])
+            except:
+                pass
+    
+    def print_board(self, board):
+        """Pretty print the board."""
+        print("  " + "-" * 25)
+        for row in board:
+            line = "  |"
+            for val in row:
+                if val == 0:
+                    line += "     |"
+                else:
+                    line += f"{val:5d}|"
+            print(line)
+        print("  " + "-" * 25)
+
+# Example usage for Claude Code
+if __name__ == "__main__":
+    client = GDB2048Client()
+    
+    print("Claude Code can use this client:")
+    print("```python")
+    print("client = GDB2048Client()")
+    print("client.start()")
+    print("client.run()")
+    print("# ... wait for board to appear ...")
+    print("client.interrupt()")
+    print("client.find_board()")
+    print("board = client.get_board()")
+    print("client.move('down')")
+    print("```")
+    
+    # Or play automatically
+    # client.play_game()
+#+end_src
+
+* Setup Script
+
+#+begin_src bash :tangle gdb-game-ai/setup_web_bridge.sh :mkdirp t :shebang #!/bin/sh
+#!/bin/sh
+
+echo "Setting up GDB Web Bridge..."
+
+# Install Flask if needed
+pip install flask requests
+
+echo "Starting web bridge..."
+echo "In another terminal, you can use:"
+echo "  python3 claude_client.py"
+echo ""
+
+python3 gdb_web_bridge.py
+#+end_src
+
+* Usage Instructions
+
+#+begin_src markdown :tangle gdb-game-ai/WEB_BRIDGE_README.md :mkdirp t
+# GDB Web Bridge for Claude Code
+
+This creates a web API that Claude Code can use to control GDB remotely.
+
+## Setup
+
+1. Install dependencies:
+   ```bash
+   pip install flask requests
+   ```
+
+2. Start the web bridge:
+   ```bash
+   python3 gdb_web_bridge.py
+   ```
+
+3. In Claude Code, use the client:
+   ```python
+   from claude_client import GDB2048Client
+   
+   client = GDB2048Client()
+   client.start()
+   client.run()
+   # Wait a bit...
+   client.interrupt()
+   client.find_board()
+   board = client.get_board()
+   print(board)
+   ```
+
+## API Endpoints
+
+- `POST /start` - Start GDB with 2048
+- `POST /run` - Run the game  
+- `POST /break` - Interrupt execution
+- `POST /find-board` - Find game board in memory
+- `GET /board` - Get current board state
+- `POST /move` - Make a move (direction: up/down/left/right/auto)
+- `POST /ai-enable` - Enable AI auto-play
+- `POST /continue` - Continue execution
+
+## Example Session
+
+```python
+# Full automated game
+client = GDB2048Client()
+client.play_game(moves=100)
+```
+#+end_src

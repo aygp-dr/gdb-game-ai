@@ -5,7 +5,7 @@
 ![Python 3.6+](https://img.shields.io/badge/python-3.6+-blue.svg)
 ![GDB Required](https://img.shields.io/badge/GDB-Required-red)
 
-A project for controlling and playing games using GDB as an interface, with AI integration for automated gameplay.
+A framework for analyzing and controlling games using GDB as an interface, with AI integration for automated gameplay.
 
 ## Overview
 
@@ -41,47 +41,89 @@ Clone the repository and set up the environment:
 ```bash
 git clone https://github.com/aygp-dr/gdb-game-ai.git
 cd gdb-game-ai
-./setup-repo-structure.sh
 ```
 
 ### Quick Start
 
-To play 2048 with the AI using Python:
+Use the main script to start with your preferred mode:
 
 ```bash
-cd gdb-game-ai
-./setup-claude-code.sh
-python3 claude_code_interface.py
+# Start with Python AI
+python main.py python
+
+# Start with Scheme AI
+python main.py scheme
+
+# Start web interface
+python main.py web
 ```
 
-For Scheme-based approach:
+### Running with Screen (Recommended)
+
+For better control and monitoring, we recommend running the game in a screen session:
 
 ```bash
-./play-2048.sh
+# Run the helper script to start 2048 in a screen session
+./scripts/screen-run.sh
+
+# Now you can:
+# 1. Watch output: tail -f /tmp/2048_live.txt
+# 2. Send keys: screen -S game2048 -X stuff "s"
+# 3. Attach GDB: gdb -p $(pgrep 2048)
 ```
+
+See [Running with Screen](docs/running_with_screen.md) for detailed instructions.
+
+### Direct GDB Usage
+
+For manual GDB control:
+
+```bash
+# Start the 2048 game in one terminal
+2048
+
+# In another terminal, attach GDB and load our scripts
+gdb -p $(pgrep 2048)
+source gdb/autoload.gdb
+
+# Find the board and start the AI
+find-board
+ai-2048
+```
+
+## Incremental Development
+
+This project is designed for incremental learning and development. Follow our step-by-step guide:
+
+1. **Basic GDB Integration** - Learn to find and read game memory
+2. **Simple AI Strategy** - Implement basic moves using breakpoints
+3. **Enhanced Python Interface** - Develop a full Python-based controller
+4. **Advanced Features** - Add web interface and sophisticated AI
+
+See the [Incremental Development Guide](docs/incremental_development.md) for detailed instructions.
 
 ## Project Structure
 
 ```
 gdb-game-ai/
-   gdb-game-ai/              # Main implementation directory
-      2048-ai.py            # Python-based AI for 2048
-      claude_code_interface.py # Interface for Claude integration
-      gdb_web_bridge.py     # Web API for remote control
-      src/                  # Source code
-          python/           # Python tools
-              analyze_2048_source.py
-              gdb_bridge.py
-   src/                      # Alternative implementations
-      scheme/               # Guile Scheme GDB scripts
-          2048-ai.scm       # Scheme-based AI for 2048
-          simple-2048.scm
-   tutorials/                # GDB learning resources
-      fibonacci.c           # Example C program for tutorials
-      fibonacci-gdb.py      # Example GDB Python script
-      useful-commands.gdb   # Useful GDB commands reference
-   play-2048.sh              # Script to start 2048 with GDB+Scheme AI
-   simple-ai.gdb             # Simple GDB script for basic AI
+├── src/                     # Source code
+│   ├── python/              # Python implementations
+│   │   ├── ai/              # AI implementations
+│   │   ├── gdb/             # GDB integration
+│   │   ├── web/             # Web interface
+│   │   └── utils/           # Utility functions
+│   └── scheme/              # Scheme implementations
+├── gdb/                     # GDB script files
+│   ├── find-board.gdb       # Board detection script
+│   ├── simple-ai.gdb        # Simple AI implementation
+│   └── autoload.gdb         # Main script to load functionality
+├── scripts/                 # Utility scripts
+├── docs/                    # Documentation
+│   ├── org/                 # Original .org files
+│   ├── incremental_development.md
+│   ├── web_api.md
+│   └── roadmap.md
+└── tutorials/               # Educational content
 ```
 
 ## AI Strategies
@@ -107,13 +149,13 @@ The project uses GDB in several innovative ways:
 A web API is provided to control the GDB session remotely:
 
 ```bash
-python3 gdb_web_bridge.py
+python main.py web
 ```
 
 This allows programmatic control through HTTP requests or via the provided client:
 
 ```python
-from claude_client import GDB2048Client
+from src.python.web.client import GDB2048Client
 client = GDB2048Client()
 client.start()
 client.find_board()
@@ -122,7 +164,7 @@ client.play_game(moves=100)
 
 ## Development Roadmap
 
-See [NEXT_STEPS.md](gdb-game-ai/NEXT_STEPS.md) for detailed development plans, including:
+See [roadmap.md](docs/roadmap.md) for detailed development plans, including:
 
 1. Board discovery improvements
 2. Advanced AI strategies
